@@ -1,0 +1,11 @@
+name = "spohabi-email-worker"
+main = "email-worker.js"
+compatibility_date = "2026-05-18"
+
+# Configure these with `wrangler secret put ...` instead of committing values:
+# - INBOUND_EMAIL_HMAC_SECRET
+#
+# Configure these as Cloudflare Worker variables:
+# - CLOUD_RUN_EMAIL_ENDPOINT = "https://<cloud-run-host>/events/spohabi-email"
+# - FORWARD_NON_SPOHABI_TO = "your-gmail-address@example.com"  # useful for Gmail forwarding verification mail
+# - FORWARD_SPOHABI_TO = ""                                   # leave unset when Gmail already keeps the original mail

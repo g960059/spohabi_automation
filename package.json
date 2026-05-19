@@ -1,0 +1,31 @@
+{
+  "name": "spohabi-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/src/index.js http",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^8.0.0",
+    "@google-cloud/secret-manager": "^6.0.1",
+    "commander": "^14.0.2",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.2",
+    "googleapis": "^171.4.0",
+    "mailparser": "^3.9.8",
+    "pino": "^10.1.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^24.10.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.0.14"
+  }
+}

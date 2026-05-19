@@ -1,0 +1,11 @@
+.git/
+.env
+data/
+secrets/
+node_modules/
+dist/
+coverage/
+playwright-profile/
+cloudflare/.wrangler/
+.DS_Store
+*.log

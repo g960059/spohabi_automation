@@ -1,0 +1,11 @@
+.env
+data/
+secrets/
+playwright-profile/
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+cloudflare/.wrangler/
+cloudflare/wrangler.toml

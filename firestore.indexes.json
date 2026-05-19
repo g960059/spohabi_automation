@@ -1,0 +1,42 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "watchlist",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "expiresAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "watchlist",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "targetStartAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "reservation_attempts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "watchId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "processed_messages",
+      "fieldPath": "ttlAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "reservation_attempts",
+      "fieldPath": "ttlAt",
+      "ttl": true,
+      "indexes": []
+    }
+  ]
+}

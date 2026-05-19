@@ -1,0 +1,9 @@
+.env
+data/
+secrets/
+node_modules/
+dist/
+coverage/
+.git/
+.DS_Store
+*.log
