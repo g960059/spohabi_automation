@@ -1,4 +1,4 @@
-export type WatchStatus = "watching" | "reserving" | "reserved" | "missed" | "expired" | "blocked";
+export type WatchStatus = "watching" | "reserving" | "reserved" | "missed" | "expired" | "blocked" | "cancelled";
 
 export interface WatchlistItem {
   id: string;
@@ -35,6 +35,13 @@ export interface ParsedReservationConfirmationEmail {
   targetEndAt: string;
   court: string | null;
   reservationMethod: string | null;
+}
+
+export interface ParsedReservationCancellationEmail {
+  schoolName: string;
+  lessonName: string;
+  targetStartAt: string;
+  targetEndAt: string;
 }
 
 export interface SpohabiReservation {

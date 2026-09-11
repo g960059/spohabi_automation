@@ -125,7 +125,7 @@ program
     }
 
     const claimedWatch = (await store.findWatchById(watch.id)) ?? watch;
-    const outcome = await new SpohabiClient().reserveForWatch(claimedWatch);
+    const outcome = await new SpohabiClient().reserveForWatch(claimedWatch, (slot) => store.canReserveWatch(watch.id, messageId, slot));
     await store.addAttempt({ watchlistId: watch.id, messageId, status: outcome.status, reason: outcome.reason, raw: outcome.raw });
 
     if (outcome.status === "reserved") {

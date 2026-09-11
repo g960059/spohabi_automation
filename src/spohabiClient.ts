@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { redactSensitive } from "./redact.js";
 import { readSecret } from "./secretStore.js";
+import { schoolDisplayName, type ReservationSlot } from "./reservationSlot.js";
 import { parseJstDateAndTime, toJstParts } from "./time.js";
 import type { ReservationOutcome, SpohabiReservation, WatchlistItem } from "./types.js";
 
@@ -101,7 +102,10 @@ interface SpohabiAuth {
 export class SpohabiClient {
   private authPromise?: Promise<SpohabiAuth>;
 
-  async reserveForWatch(item: WatchlistItem): Promise<ReservationOutcome> {
+  async reserveForWatch(item: WatchlistItem, canReserve?: (slot?: ReservationSlot) => Promise<boolean>): Promise<ReservationOutcome> {
+    if (item.status === "cancelled" || (canReserve && !(await canReserve()))) {
+      return { status: "blocked", reason: "auto_reservation_stopped" };
+    }
     const school = await this.resolveSchool(item.school_slug);
     const eventDate = await this.resolveEventDate(school.schema, item);
     if (!eventDate) return { status: "missed", reason: "event_date_not_found" };
@@ -137,6 +141,13 @@ export class SpohabiClient {
     }
 
     const url = `${config.SPOHABI_RESERVE_API_BASE}/api/v1/reserve?schema=${encodeURIComponent(school.schema)}&slug=${encodeURIComponent(school.slug)}`;
+    if (canReserve && !(await canReserve({
+      schoolName: schoolDisplayName(school.slug),
+      lessonName: eventDate.schedule.lesson.lesson_name,
+      targetStartAt: item.target_start_at
+    }))) {
+      return { status: "blocked", reason: "auto_reservation_stopped" };
+    }
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -545,9 +556,4 @@ function assertSchemaIdentifier(schema: string): void {
   if (!/^[a-z0-9_]+$/.test(schema)) {
     throw new Error(`Unexpected Spohabi schema identifier: ${schema}`);
   }
-}
-
-function schoolDisplayName(slug: string): string {
-  if (slug === "fc-tennis") return "ファーストシティテニスクラブ";
-  return slug;
 }

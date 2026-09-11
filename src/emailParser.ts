@@ -1,5 +1,5 @@
 import { extractLessonInfo, normalizeLessonUrl, parseJstDateAndTime } from "./time.js";
-import type { ParsedReservationConfirmationEmail, ParsedVacancyEmail } from "./types.js";
+import type { ParsedReservationCancellationEmail, ParsedReservationConfirmationEmail, ParsedVacancyEmail } from "./types.js";
 
 const VACANCY_PHRASE = "以下のレッスンに空席が出ました";
 const RESERVATION_COMPLETE_PHRASE = "以下のご予約が完了しました";
@@ -51,11 +51,28 @@ export function isSpohabiReservationConfirmationText(text: string): boolean {
 }
 
 export function isSpohabiReservationCancellationText(text: string): boolean {
-  return RESERVATION_CANCEL_PATTERNS.some((pattern) => text.includes(pattern)) && /予約日程[:：]/.test(text) && /レッスン(?:（イベント）)?[:：]/.test(text);
+  return RESERVATION_CANCEL_PATTERNS.some((pattern) => text.includes(pattern)) && /予約日程[:：]/.test(text) && /レッスン(?:（イベント）|\(イベント\))?[:：]/.test(text);
 }
 
 export function isSpohabiReservationReminderText(text: string): boolean {
   return RESERVATION_REMINDER_PATTERNS.some((pattern) => text.includes(pattern)) && /予約日程[:：]/.test(text) && /レッスン(?:（イベント）)?[:：]/.test(text);
+}
+
+export function parseReservationCancellationEmail(text: string): ParsedReservationCancellationEmail | null {
+  if (!isSpohabiReservationCancellationText(text)) return null;
+  const schoolName = matchLine(text, /^スクール[:：][ \t]*(.+)$/m);
+  const lessonName = matchLine(text, /^レッスン(?:（イベント）|\(イベント\))?[:：][ \t]*(.+)$/m);
+  const dateMatch = text.match(/^予約日程[:：][ \t]*(\d{4}\/\d{2}\/\d{2})[ \t]+(\d{1,2}:\d{2})[ \t]*-[ \t]*(\d{1,2}:\d{2})[ \t]*\r?$/m);
+  if (!schoolName || !lessonName || !dateMatch) return null;
+  const start = parseJstDateAndTime(dateMatch[1], dateMatch[2]);
+  const end = parseJstDateAndTime(dateMatch[1], dateMatch[3]);
+  // Reject invalid dates instead of letting Date normalize them into another lesson's slot.
+  for (const [date, time] of [[start, dateMatch[2]], [end, dateMatch[3]]] as const) {
+    const expected = `${dateMatch[1].replace(/\//g, "-")}T${time.padStart(5, "0")}:00.000Z`;
+    if (!Number.isFinite(date.getTime()) || new Date(date.getTime() + 9 * 60 * 60 * 1000).toISOString() !== expected) return null;
+  }
+  if (end <= start) return null;
+  return { schoolName, lessonName, targetStartAt: start.toISOString(), targetEndAt: end.toISOString() };
 }
 
 export function parseReservationConfirmationEmail(text: string): ParsedReservationConfirmationEmail | null {

@@ -2,7 +2,8 @@ import { Firestore, FieldValue, Timestamp } from "@google-cloud/firestore";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { nowIso, toJstParts } from "./time.js";
-import type { WatchStatus, WatchlistItem } from "./types.js";
+import { reservationSlotKey, schoolDisplayName, type ReservationSlot } from "./reservationSlot.js";
+import type { ParsedReservationCancellationEmail, WatchStatus, WatchlistItem } from "./types.js";
 
 const MESSAGE_LEASE_MS = 180_000;
 const WATCH_LEASE_MS = 180_000;
@@ -17,7 +18,7 @@ export interface GmailSyncLease {
 }
 
 export class FirestoreStore {
-  private db = config.GOOGLE_CLOUD_PROJECT ? new Firestore({ projectId: config.GOOGLE_CLOUD_PROJECT }) : new Firestore();
+  constructor(private db = config.GOOGLE_CLOUD_PROJECT ? new Firestore({ projectId: config.GOOGLE_CLOUD_PROJECT }) : new Firestore()) {}
 
   gmailStateRef() {
     return this.db.collection("app_state").doc("gmail");
@@ -38,15 +39,18 @@ export class FirestoreStore {
     note?: string;
   }): Promise<WatchlistItem> {
     const id = this.watchId(input.schoolSlug, input.lessonId, input.targetStartAt);
-    const at = nowIso();
-    await this.db.collection("watchlist").doc(id).set(
-      {
+    const ref = this.db.collection("watchlist").doc(id);
+    await this.db.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      const data = doc.data() ?? {};
+      const next = {
         lessonUrl: input.lessonUrl,
         lessonId: input.lessonId,
         schoolSlug: input.schoolSlug,
         targetStartAt: Timestamp.fromDate(new Date(input.targetStartAt)),
         expiresAt: Timestamp.fromDate(new Date(input.expiresAt)),
-        lessonName: input.lessonName ?? null,
+        lessonName: input.lessonName ?? data.lessonName ?? null,
+        schoolName: data.schoolName ?? schoolDisplayName(input.schoolSlug),
         ticketPriority: input.ticketPriority ?? [],
         note: input.note ?? null,
         status: "watching",
@@ -55,9 +59,10 @@ export class FirestoreStore {
         reservationMessageId: null,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
+      };
+      const stopped = data.status === "cancelled" || await this.isCancelledInTransaction(tx, next);
+      tx.set(ref, { ...next, status: stopped ? "cancelled" : "watching" }, { merge: true });
+    });
     const watch = await this.findWatchById(id);
     if (!watch) throw new Error(`Failed to create watchlist item: ${id}`);
     return watch;
@@ -67,6 +72,7 @@ export class FirestoreStore {
     lessonUrl: string;
     lessonId: number;
     schoolSlug: string;
+    schoolName?: string | null;
     targetStartAt: string;
     expiresAt: string;
     lessonName?: string;
@@ -78,19 +84,25 @@ export class FirestoreStore {
     await this.db.runTransaction(async (tx) => {
       const doc = await tx.get(ref);
       const data = doc.data() ?? {};
+      const schoolName = input.schoolName ?? data.schoolName ?? schoolDisplayName(input.schoolSlug);
+      const lessonName = input.lessonName ?? data.lessonName ?? null;
+      const stopped = data.status === "cancelled" || await this.isCancelledInTransaction(tx, {
+        schoolName, lessonName, targetStartAt: input.targetStartAt
+      });
       const status = data.status;
       const lease = data.reservationLeaseUntil instanceof Timestamp ? data.reservationLeaseUntil.toMillis() : 0;
-      const keepReservationLease = status === "reserving" && lease > now;
+      const keepReservationLease = !stopped && status === "reserving" && lease > now;
       const next = {
         lessonUrl: input.lessonUrl,
         lessonId: input.lessonId,
         schoolSlug: input.schoolSlug,
         targetStartAt: Timestamp.fromDate(new Date(input.targetStartAt)),
         expiresAt: Timestamp.fromDate(new Date(input.expiresAt)),
-        lessonName: input.lessonName ?? data.lessonName ?? null,
+        lessonName,
+        schoolName,
         note: input.note ?? data.note ?? null,
         ticketPriority: data.ticketPriority ?? [],
-        status: keepReservationLease ? "reserving" : "watching",
+        status: stopped ? "cancelled" : keepReservationLease ? "reserving" : "watching",
         eventDateId: keepReservationLease ? (data.eventDateId ?? null) : null,
         reservationLeaseUntil: keepReservationLease ? data.reservationLeaseUntil : null,
         reservationMessageId: keepReservationLease ? data.reservationMessageId : null,
@@ -131,30 +143,32 @@ export class FirestoreStore {
   }
 
   async expireDueWatches(at = new Date()): Promise<WatchlistItem[]> {
-    const snapshot = await this.db.collection("watchlist").where("status", "in", ["watching", "reserving"]).where("expiresAt", "<=", Timestamp.fromDate(at)).get();
-    if (snapshot.empty) return [];
-    const batch = this.db.batch();
-    const expired = snapshot.docs.map((doc) => fromWatchDoc(doc.id, doc.data()));
-    for (const doc of snapshot.docs) {
-      batch.update(doc.ref, { status: "expired", updatedAt: FieldValue.serverTimestamp() });
-    }
-    await batch.commit();
-    return expired.map((item) => ({ ...item, status: "expired" as const }));
+    return this.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(this.db.collection("watchlist").where("status", "in", ["watching", "reserving"]).where("expiresAt", "<=", Timestamp.fromDate(at)));
+      for (const doc of snapshot.docs) {
+        tx.update(doc.ref, { status: "expired", updatedAt: FieldValue.serverTimestamp() });
+      }
+      return snapshot.docs.map((doc) => ({ ...fromWatchDoc(doc.id, doc.data()), status: "expired" as const }));
+    });
   }
 
   async updateWatchStatus(id: string, status: WatchStatus, eventDateId?: number | null): Promise<void> {
-    await this.db
-      .collection("watchlist")
-      .doc(id)
-      .set(
+    const ref = this.db.collection("watchlist").doc(id);
+    await this.db.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      const data = doc.data() ?? {};
+      if (data.status === "cancelled") return;
+      const nextStatus = await this.isCancelledInTransaction(tx, data) ? "cancelled" : status;
+      tx.set(ref,
         {
-          status,
+          status: nextStatus,
           ...(eventDateId !== undefined && eventDateId !== null ? { eventDateId } : {}),
-          ...(status !== "reserving" ? { reservationLeaseUntil: null, reservationMessageId: null } : {}),
+          ...(nextStatus !== "reserving" ? { reservationLeaseUntil: null, reservationMessageId: null } : {}),
           updatedAt: FieldValue.serverTimestamp()
         },
         { merge: true }
       );
+    });
   }
 
   async claimWatchForReservation(id: string, messageId: string): Promise<boolean> {
@@ -167,6 +181,7 @@ export class FirestoreStore {
       const status = data.status;
       const lease = data.reservationLeaseUntil instanceof Timestamp ? data.reservationLeaseUntil.toMillis() : 0;
       if (status !== "watching" && !(status === "reserving" && lease <= now)) return false;
+      if (await this.isCancelledInTransaction(tx, data)) return false;
       tx.update(ref, {
         status: "reserving",
         reservationLeaseUntil: Timestamp.fromMillis(now + WATCH_LEASE_MS),
@@ -178,15 +193,48 @@ export class FirestoreStore {
   }
 
   async releaseWatchReservation(id: string): Promise<void> {
-    await this.db.collection("watchlist").doc(id).set(
-      {
-        status: "watching",
-        reservationLeaseUntil: null,
-        reservationMessageId: null,
+    await this.updateWatchStatus(id, "watching");
+  }
+
+  async cancelAutoReservation(slot: ParsedReservationCancellationEmail, messageId: string): Promise<number> {
+    const key = reservationSlotKey(slot);
+    return this.db.runTransaction(async (tx) => {
+      const watches = await tx.get(this.db.collection("watchlist").where("targetStartAt", "==", Timestamp.fromDate(new Date(slot.targetStartAt))));
+      // Keep the stop record even when no vacancy notification/watch has arrived yet.
+      tx.set(this.db.collection("reservation_cancellations").doc(key), {
+        ...slot,
+        messageId,
         updatedAt: FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
+      });
+      let stopped = 0;
+      for (const watch of watches.docs) {
+        if (watchCancellationKey(watch.data()) !== key) continue;
+        tx.update(watch.ref, {
+          status: "cancelled",
+          reservationLeaseUntil: null,
+          reservationMessageId: null,
+          updatedAt: FieldValue.serverTimestamp()
+        });
+        stopped++;
+      }
+      return stopped;
+    });
+  }
+
+  async canReserveWatch(id: string, messageId: string, resolvedSlot?: ReservationSlot): Promise<boolean> {
+    return this.db.runTransaction(async (tx) => {
+      const doc = await tx.get(this.db.collection("watchlist").doc(id));
+      const data = doc.data();
+      if (!data || data.status !== "reserving" || data.reservationMessageId !== messageId) return false;
+      if (!(data.reservationLeaseUntil instanceof Timestamp) || data.reservationLeaseUntil.toMillis() <= Date.now()) return false;
+      if (await this.isCancelledInTransaction(tx, data)) return false;
+      return !resolvedSlot || !(await this.isCancelledInTransaction(tx, resolvedSlot));
+    });
+  }
+
+  private async isCancelledInTransaction(tx: FirebaseFirestore.Transaction, data: FirebaseFirestore.DocumentData): Promise<boolean> {
+    const key = watchCancellationKey(data);
+    return key ? (await tx.get(this.db.collection("reservation_cancellations").doc(key))).exists : false;
   }
 
   async hasProcessedMessage(messageId: string): Promise<boolean> {
@@ -435,4 +483,10 @@ function timestampToIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   return nowIso();
+}
+
+function watchCancellationKey(data: FirebaseFirestore.DocumentData): string | null {
+  const schoolName = data.schoolName || (data.schoolSlug ? schoolDisplayName(data.schoolSlug) : null);
+  if (!schoolName || !data.lessonName || !data.targetStartAt) return null;
+  return reservationSlotKey({ schoolName, lessonName: data.lessonName, targetStartAt: timestampToIso(data.targetStartAt) });
 }

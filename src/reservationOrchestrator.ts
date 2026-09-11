@@ -1,5 +1,5 @@
 import { FirestoreStore } from "./firestoreStore.js";
-import { isSpohabiReservationCancellationText, isSpohabiReservationReminderText, parseReservationConfirmationEmail, parseVacancyEmail } from "./emailParser.js";
+import { isSpohabiReservationCancellationText, isSpohabiReservationReminderText, parseReservationCancellationEmail, parseReservationConfirmationEmail, parseVacancyEmail } from "./emailParser.js";
 import { GmailMessageNotFoundError, GmailReader } from "./gmailClient.js";
 import { logger } from "./logger.js";
 import { SpohabiClient } from "./spohabiClient.js";
@@ -46,17 +46,19 @@ export class ReservationOrchestrator {
       return;
     }
 
-    await this.expireDueWatchesWithNotification();
     if (!isTrustedSpohabiSender(message.from) || !hasTrustedSpohabiAuthentication(message.authenticationResults)) {
       await this.db.markProcessed({ messageId, historyId: message.historyId ?? undefined, status: "ignored", reason: "untrusted_sender" });
       logger.warn({ messageId, from: message.from }, "Ignored vacancy-like Gmail message from unexpected sender");
       return;
     }
 
-    const parsed = parseVacancyEmail(message.text);
+    const isCancellation = isSpohabiReservationCancellationText(message.text);
+    const cancellation = parseReservationCancellationEmail(message.text);
+    if (isCancellation && !cancellation) throw new Error("Cannot identify the lesson slot in the cancellation email");
+    if (!isCancellation) await this.expireDueWatchesWithNotification();
+    const parsed = isCancellation ? null : parseVacancyEmail(message.text);
     if (!parsed) {
       const confirmation = parseReservationConfirmationEmail(message.text);
-      const isCancellation = isSpohabiReservationCancellationText(message.text);
       const isReminder = isSpohabiReservationReminderText(message.text);
       if (!confirmation && !isCancellation && !isReminder) {
         await this.db.markProcessed({ messageId, historyId: message.historyId ?? undefined, status: "ignored", reason: "not_spohabi_vacancy_or_confirmation" });
@@ -65,6 +67,15 @@ export class ReservationOrchestrator {
       if (!(await this.db.claimMessage(messageId, message.historyId ?? undefined, Boolean(options.allowDryRunReplay && !config.DRY_RUN)))) {
         logger.debug({ messageId }, "Gmail message already claimed");
         return;
+      }
+      if (cancellation) {
+        try {
+          const stopped = await this.db.cancelAutoReservation(cancellation, messageId);
+          logger.info({ messageId, ...cancellation, stopped }, "Stopped automatic reservation for cancelled lesson");
+        } catch (error) {
+          await this.db.markProcessed({ messageId, status: "retryable", reason: "cancellation_save_failed" });
+          throw error;
+        }
       }
       let outcome;
       try {
@@ -103,11 +114,18 @@ export class ReservationOrchestrator {
       lessonUrl: normalizeLessonUrl(parsed.lessonUrl),
       lessonId: parsed.lessonId,
       schoolSlug: parsed.schoolSlug,
+      schoolName: parsed.schoolName,
       targetStartAt: parsed.targetStartAt,
       expiresAt,
       lessonName: parsed.lessonName,
       note: "auto-created from Spohabi vacancy notification"
     });
+
+    if (watch.status === "cancelled") {
+      await this.db.markProcessed({ messageId, watchlistId: watch.id, status: "ignored", reason: "reservation_cancelled" });
+      logger.info({ messageId, watchId: watch.id }, "Skipped vacancy for cancelled lesson");
+      return;
+    }
 
     if (!(await this.db.claimWatchForReservation(watch.id, messageId))) {
       await this.db.markProcessed({ messageId, historyId: message.historyId ?? undefined, watchlistId: watch.id, status: "ignored", reason: "watch_reservation_already_claimed" });
@@ -118,7 +136,7 @@ export class ReservationOrchestrator {
     let outcome;
     try {
       const currentWatch = (await this.db.findWatchById(watch.id)) ?? watch;
-      outcome = await this.spohabi.reserveForWatch(currentWatch);
+      outcome = await this.spohabi.reserveForWatch(currentWatch, (slot) => this.db.canReserveWatch(watch.id, messageId, slot));
     } catch (error) {
       logger.error({ error, watchId: watch.id }, "Spohabi reservation path threw");
       await this.db.addAttempt({ watchlistId: watch.id, messageId, status: "failed", reason: "spohabi_exception", raw: errorSummary(error) });
@@ -128,6 +146,13 @@ export class ReservationOrchestrator {
     }
 
     await this.db.addAttempt({ watchlistId: watch.id, messageId, status: outcome.status, reason: outcome.reason, raw: redactSensitive(outcome.raw) });
+
+    if (outcome.reason === "auto_reservation_stopped") {
+      await this.db.releaseWatchReservation(watch.id);
+      await this.db.markProcessed({ messageId, watchlistId: watch.id, status: "ignored", reason: outcome.reason });
+      logger.info({ messageId, watchId: watch.id }, "Stopped reservation before submitting to Spohabi");
+      return;
+    }
 
     if (outcome.status === "reserved") {
       await this.db.updateWatchStatus(watch.id, "reserved");
